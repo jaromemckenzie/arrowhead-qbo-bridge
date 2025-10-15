@@ -251,6 +251,17 @@ app.get("/qbo/reports/:name", async (req, res) => {
     res.json(data);
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
+// ---- list connected companies ----
+app.get("/qbo/companies", async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "select company_name, realm_id from qbo_tokens order by company_name"
+    );
+    res.json({ companies: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ---- start server ----
 const PORT = process.env.PORT || 8080;
