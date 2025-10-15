@@ -18,7 +18,7 @@ const {
   QBO_REDIRECT_URI,
   QBO_AUTH_URL = "https://appcenter.intuit.com/connect/oauth2",
   QBO_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
-  QBO_API_BASE = "https://quickbooks.api.intuit.com/v3/company",
+  QBO_API_BASE = "https://sandbox-quickbooks.api.intuit.com/v3/company", // use sandbox by default
   ENC_KEY = "PLEASE_SET_32_CHAR_KEY_IN_RENDER_ENV"
 } = process.env;
 
@@ -103,10 +103,12 @@ app.get("/cb", async (req, res) => {
       },
       body
     });
+
     if (!resp.ok) {
       const t = await resp.text();
       return res.status(500).send("Token exchange failed: " + t);
     }
+
     const j = await resp.json();
     const now = Date.now();
     const accessExp = new Date(now + (j.expires_in || 3600) * 1000);
@@ -114,11 +116,37 @@ app.get("/cb", async (req, res) => {
       ? new Date(now + j.x_refresh_token_expires_in * 1000)
       : new Date(now + 60 * 24 * 3600 * 1000); // ~60 days fallback
 
+    const accessToken = j.access_token;
+    let companyName = null;
+
+    // ---- Fetch company name from QuickBooks ----
+    try {
+      const infoResp = await fetch(
+        `https://sandbox-quickbooks.api.intuit.com/v3/company/${realmId}/companyinfo/${realmId}`,
+        {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Accept": "application/json"
+          }
+        }
+      );
+      if (infoResp.ok) {
+        const info = await infoResp.json();
+        companyName = info?.CompanyInfo?.CompanyName || null;
+      } else {
+        console.warn("Company info fetch failed:", await infoResp.text());
+      }
+    } catch (err) {
+      console.warn("Company info error:", err.message);
+    }
+
+    // ---- Save token + company name ----
     await pool.query(
       `insert into qbo_tokens (realm_id, company_name, access_token_enc, refresh_token_enc,
                                access_expires_at, refresh_expires_at)
        values ($1,$2,$3,$4,$5,$6)
        on conflict (realm_id) do update set
+         company_name=excluded.company_name,
          access_token_enc=excluded.access_token_enc,
          refresh_token_enc=excluded.refresh_token_enc,
          access_expires_at=excluded.access_expires_at,
@@ -126,15 +154,15 @@ app.get("/cb", async (req, res) => {
          updated_at=now()`,
       [
         realmId.toString(),
-        null,
-        seal(j.access_token),
+        companyName,
+        seal(accessToken),
         seal(j.refresh_token),
         accessExp,
         refreshExp
       ]
     );
 
-    res.send(`Connected! Realm ${realmId} is now authorized.`);
+    res.send(`Connected! Realm ${realmId} (${companyName || "Unknown Company"}) is now authorized.`);
   } catch (e) {
     res.status(500).send("Callback error: " + (e.message || e));
   }
@@ -251,6 +279,7 @@ app.get("/qbo/reports/:name", async (req, res) => {
     res.json(data);
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
+
 // ---- list connected companies ----
 app.get("/qbo/companies", async (_req, res) => {
   try {
